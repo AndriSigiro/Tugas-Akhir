@@ -1,14 +1,17 @@
 import 'dart:convert';
 import 'dart:io';
+import 'package:esp32cam_app/detail_page.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
+import 'detail_page.dart'; // pastikan path-nya benar
+import 'package:cached_network_image/cached_network_image.dart';
 
 void main() {
   runApp(const MyApp());
 }
 
-const String baseUrl = "http://172.27.66.170:9090";
+const String baseUrl = "http://172.18.215.92:9090";
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
@@ -144,10 +147,14 @@ class _HomePageState extends State<HomePage>
     );
   }
 
-  Color _getScoreColor(double score) {
-    if (score >= 0.8) return Colors.green;
-    if (score >= 0.6) return Colors.orange;
-    return Colors.red;
+  Color _getLabelColor(String label) {
+    if (label == "fertile") {
+      return Colors.green;
+    } else if (label == "unfertile") {
+      return const Color(0xFFFF9800); // Orange Material
+    } else {
+      return Colors.grey;
+    }
   }
 
   Map<String, dynamic>? get _bestPrediction {
@@ -230,10 +237,11 @@ class _HomePageState extends State<HomePage>
             ),
           ),
           IconButton(
-            onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const HistoryPage()),
-            ),
+            onPressed:
+                () => Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const HistoryPage()),
+                ),
             icon: Container(
               padding: const EdgeInsets.all(10),
               decoration: BoxDecoration(
@@ -320,7 +328,9 @@ class _HomePageState extends State<HomePage>
   Widget _buildImageContainer() {
     return Container(
       width: double.infinity,
-      height: 320,
+      constraints: const BoxConstraints(
+        maxHeight: 500, // batas maksimal biar tidak terlalu tinggi
+      ),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(20),
@@ -335,9 +345,8 @@ class _HomePageState extends State<HomePage>
       child: ClipRRect(
         borderRadius: BorderRadius.circular(20),
         child: Stack(
-          fit: StackFit.expand,
           children: [
-            _buildImage(),
+            _buildImage(), // gambar utama
             if (_predictions.isNotEmpty) _buildImageOverlay(),
           ],
         ),
@@ -346,27 +355,58 @@ class _HomePageState extends State<HomePage>
   }
 
   Widget _buildImage() {
+    // Prioritas: 1. hasil deteksi (dengan box), 2. latest dari server, 3. gambar lokal
     if (_imageWithBoxesBase64 != null) {
-      return Image.memory(
-        base64Decode(_imageWithBoxesBase64!.split(',').last),
-        fit: BoxFit.cover,
-        errorBuilder: (_, __, ___) => _buildFallbackImage(),
+      return _buildNetworkOrMemoryImage(
+        isBase64: true,
+        data: _imageWithBoxesBase64!,
       );
     } else if (_latestImageUrl != null) {
-      return Image.network(
-        _latestImageUrl!,
-        fit: BoxFit.cover,
-        loadingBuilder: (context, child, progress) {
-          return progress == null
-              ? child
-              : const Center(child: CircularProgressIndicator());
-        },
-        errorBuilder: (_, __, ___) => _buildFallbackImage(),
-      );
+      return _buildNetworkOrMemoryImage(isBase64: false, url: _latestImageUrl!);
     } else if (_imageFile != null) {
-      return Image.file(_imageFile!, fit: BoxFit.cover);
+      return Image.file(
+        _imageFile!,
+        fit: BoxFit.contain, // penting!
+        width: double.infinity,
+      );
     }
+
     return _buildFallbackImage();
+  }
+
+  // FUNGSI BARU: menangani gambar dari base64 atau network dengan rasio asli
+  Widget _buildNetworkOrMemoryImage({
+    required bool isBase64,
+    String? url,
+    String? data,
+  }) {
+    // Gunakan InteractiveViewer biar bisa zoom & pan kalau perlu
+    return InteractiveViewer(
+      minScale: 0.5,
+      maxScale: 4.0,
+      child: Container(
+        width: double.infinity,
+        color: Colors.black, // background hitam biar kelihatan rapi
+        child:
+            isBase64
+                ? Image.memory(
+                  base64Decode(data!.split(',').last),
+                  fit:
+                      BoxFit.contain, // INI YANG MEMBUAT GAMBAR TIDAK DIPOTONG!
+                  gaplessPlayback: true,
+                  errorBuilder: (_, __, ___) => _buildFallbackImage(),
+                )
+                : CachedNetworkImage(
+                  imageUrl: url!,
+                  fit: BoxFit.contain, // SAMA PENTING DI SINI!
+                  placeholder:
+                      (context, url) => const Center(
+                        child: CircularProgressIndicator(color: Colors.white),
+                      ),
+                  errorWidget: (context, url, error) => _buildFallbackImage(),
+                ),
+      ),
+    );
   }
 
   Widget _buildImageOverlay() {
@@ -392,18 +432,6 @@ class _HomePageState extends State<HomePage>
                 fontSize: 14,
               ),
             ),
-            if (_bestPrediction != null) ...[
-              const SizedBox(width: 12),
-              Container(width: 1, height: 16, color: Colors.white38),
-              const SizedBox(width: 8),
-              Text(
-                "${(_bestPrediction!["score"] * 100).toStringAsFixed(0)}%",
-                style: TextStyle(
-                  color: _getScoreColor(_bestPrediction!["score"]),
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ],
           ],
         ),
       ),
@@ -485,12 +513,12 @@ class _HomePageState extends State<HomePage>
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
-                  color: _getScoreColor(best["score"]).withOpacity(0.1),
+                  color: _getLabelColor(best["label"]).withOpacity(0.1),
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: Icon(
                   Icons.check_circle,
-                  color: _getScoreColor(best["score"]),
+                  color: _getLabelColor(best["label"]),
                   size: 32,
                 ),
               ),
@@ -533,40 +561,6 @@ class _HomePageState extends State<HomePage>
             decoration: BoxDecoration(
               color: Colors.grey.shade50,
               borderRadius: BorderRadius.circular(12),
-            ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                const Text(
-                  "Confidence Tertinggi",
-                  style: TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w500,
-                    color: Colors.grey,
-                  ),
-                ),
-                Row(
-                  children: [
-                    Container(
-                      width: 8,
-                      height: 8,
-                      decoration: BoxDecoration(
-                        color: _getScoreColor(best["score"]),
-                        shape: BoxShape.circle,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      "${(best["score"] * 100).toStringAsFixed(1)}%",
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                        color: _getScoreColor(best["score"]),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
             ),
           ),
         ],
@@ -712,10 +706,40 @@ class _HistoryPageState extends State<HistoryPage> {
     setState(() => _loading = false);
   }
 
-  Color _getScoreColor(double score) {
-    if (score >= 0.8) return Colors.green;
-    if (score >= 0.6) return Colors.orange;
-    return Colors.red;
+  String _formatTimestamp(int timestamp) {
+    final date = DateTime.fromMillisecondsSinceEpoch(timestamp * 1000);
+    final now = DateTime.now();
+    final diff = now.difference(date);
+
+    if (diff.inMinutes < 60) {
+      return "${diff.inMinutes} menit lalu";
+    } else if (diff.inHours < 24) {
+      return "${diff.inHours} jam lalu";
+    } else if (diff.inDays < 7) {
+      return "${diff.inDays} hari lalu";
+    } else {
+      return "${date.day}/${date.month}/${date.year}";
+    }
+  }
+
+  Color _getLabelColor(String label) {
+    final lowerLabel = label.toLowerCase();
+    if (lowerLabel.contains('fertile')) {
+      return Colors.green;
+    } else if (lowerLabel.contains('unfertil') ||
+        lowerLabel.contains('unfertile')) {
+      return Colors.orange.shade700; // Orange gelap biar kelihatan bagus
+    } else {
+      return Colors.grey;
+    }
+  }
+
+  IconData _getLabelIcon(String label) {
+    final normalized = label.toLowerCase();
+    if (normalized.contains('fertil') && !normalized.contains('in')) {
+      return Icons.check_circle_rounded;
+    }
+    return Icons.cancel_rounded;
   }
 
   @override
@@ -724,17 +748,17 @@ class _HistoryPageState extends State<HistoryPage> {
       body: Container(
         decoration: BoxDecoration(
           gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [Colors.purple.shade50, Colors.white],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              const Color(0xFFF8F9FA),
+              Colors.purple.shade50.withOpacity(0.3),
+            ],
           ),
         ),
         child: SafeArea(
           child: Column(
-            children: [
-              _buildHeader(),
-              Expanded(child: _buildContent()),
-            ],
+            children: [_buildHeader(), Expanded(child: _buildContent())],
           ),
         ),
       ),
@@ -743,50 +767,62 @@ class _HistoryPageState extends State<HistoryPage> {
 
   Widget _buildHeader() {
     return Container(
-      padding: const EdgeInsets.all(24),
-      child: Row(
-        children: [
-          IconButton(
-            onPressed: () => Navigator.pop(context),
-            icon: Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(12),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withOpacity(0.1),
-                    blurRadius: 10,
-                    offset: const Offset(0, 5),
-                  ),
-                ],
-              ),
-              child: const Icon(
-                Icons.arrow_back_ios_new,
-                size: 20,
-                color: Color(0xFF1A1A2E),
-              ),
-            ),
+      padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.03),
+            blurRadius: 10,
+            offset: const Offset(0, 2),
           ),
-          const SizedBox(width: 16),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  "Riwayat Deteksi",
-                  style: TextStyle(
-                    fontSize: 24,
-                    fontWeight: FontWeight.bold,
+        ],
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Container(
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade100,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: IconButton(
+                  onPressed: () => Navigator.pop(context),
+                  icon: const Icon(
+                    Icons.arrow_back_ios_new_rounded,
+                    size: 20,
                     color: Color(0xFF1A1A2E),
                   ),
                 ),
-                Text(
-                  "${items.length} hasil",
-                  style: TextStyle(fontSize: 13, color: Colors.grey.shade600),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      "Riwayat Deteksi",
+                      style: TextStyle(
+                        fontSize: 26,
+                        fontWeight: FontWeight.bold,
+                        color: Color(0xFF1A1A2E),
+                        letterSpacing: -0.5,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      "${items.length} hasil scan tersimpan",
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: Colors.grey.shade600,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
         ],
       ),
@@ -796,7 +832,20 @@ class _HistoryPageState extends State<HistoryPage> {
   Widget _buildContent() {
     if (_loading) {
       return Center(
-        child: CircularProgressIndicator(color: Colors.purple.shade600),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            CircularProgressIndicator(
+              color: Colors.purple.shade600,
+              strokeWidth: 3,
+            ),
+            const SizedBox(height: 16),
+            Text(
+              "Memuat riwayat...",
+              style: TextStyle(fontSize: 14, color: Colors.grey.shade600),
+            ),
+          ],
+        ),
       );
     }
 
@@ -808,108 +857,207 @@ class _HistoryPageState extends State<HistoryPage> {
       onRefresh: fetchHistory,
       color: Colors.purple.shade600,
       child: ListView.builder(
-        padding: const EdgeInsets.symmetric(horizontal: 20),
+        padding: const EdgeInsets.all(20),
         itemCount: items.length,
-        itemBuilder: (_, i) => _buildHistoryItem(items[i]),
+        itemBuilder: (_, i) => _buildHistoryItem(items[i], i),
       ),
     );
   }
 
-  Widget _buildHistoryItem(Map<String, dynamic> item) {
+  Widget _buildHistoryItem(Map<String, dynamic> item, int index) {
     final preds = List<Map<String, dynamic>>.from(item["pred"]);
-    final best = preds.isNotEmpty
-        ? preds.reduce((a, b) => a["score"] > b["score"] ? a : b)
-        : null;
+    final best =
+        preds.isNotEmpty
+            ? preds.reduce((a, b) => a["score"] > b["score"] ? a : b)
+            : null;
 
-    return Container(
-      margin: const EdgeInsets.only(bottom: 16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 10,
-            offset: const Offset(0, 5),
+    final label = best?["label"] ?? "Unknown";
+    final labelColor = best != null ? _getLabelColor(label) : Colors.grey;
+    final imageUrl = "${item["image_url"]}";
+    return TweenAnimationBuilder(
+      duration: Duration(milliseconds: 300 + (index * 50)),
+      tween: Tween<double>(begin: 0, end: 1),
+      builder: (context, double value, child) {
+        return Opacity(
+          opacity: value,
+          child: Transform.translate(
+            offset: Offset(0, 20 * (1 - value)),
+            child: child,
           ),
-        ],
-      ),
-      child: ListTile(
-        contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-        leading: Container(
-          width: 56,
-          height: 56,
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              colors: [
-                best != null ? _getScoreColor(best["score"]) : Colors.grey,
-                (best != null ? _getScoreColor(best["score"]) : Colors.grey)
-                    .withOpacity(0.7),
-              ],
+        );
+      },
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 16),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(20),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.04),
+              blurRadius: 15,
+              offset: const Offset(0, 4),
             ),
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: const Icon(Icons.egg, color: Colors.white, size: 28),
+          ],
         ),
-        title: Text(
-          best?["label"] ?? "Unknown",
-          style: const TextStyle(
-            fontSize: 18,
-            fontWeight: FontWeight.bold,
-            color: Color(0xFF1A1A2E),
-          ),
-        ),
-        subtitle: Padding(
-          padding: const EdgeInsets.only(top: 8),
-          child: Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                decoration: BoxDecoration(
-                  color: Colors.grey.shade100,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  "ID: ${item["id"]}",
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.grey.shade700,
-                    fontWeight: FontWeight.w500,
-                  ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(20),
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => DetailPage(item: item)),
+                );
+              },
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  children: [
+                    // Image Preview
+                    Container(
+                      width: 80,
+                      height: 80,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(
+                          color: labelColor.withOpacity(0.2),
+                          width: 2,
+                        ),
+                      ),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(14),
+                        child: Image.network(
+                          imageUrl,
+                          fit: BoxFit.cover,
+                          errorBuilder:
+                              (_, __, ___) => Container(
+                                color: Colors.grey.shade100,
+                                child: Icon(
+                                  Icons.egg_outlined,
+                                  size: 36,
+                                  color: Colors.grey.shade400,
+                                ),
+                              ),
+                          loadingBuilder: (_, child, loadingProgress) {
+                            if (loadingProgress == null) return child;
+                            return Container(
+                              color: Colors.grey.shade100,
+                              child: Center(
+                                child: SizedBox(
+                                  width: 24,
+                                  height: 24,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.grey.shade400,
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 16),
+
+                    // Info Section
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          // Status Badge
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 6,
+                            ),
+                            decoration: BoxDecoration(
+                              color: labelColor.withOpacity(0.1),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  _getLabelIcon(label),
+                                  size: 16,
+                                  color: labelColor,
+                                ),
+                                const SizedBox(width: 6),
+                                Text(
+                                  label.toUpperCase(),
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold,
+                                    color: labelColor,
+                                    letterSpacing: 0.5,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+
+                          // Object count & Time
+                          Row(
+                            children: [
+                              Icon(
+                                Icons.radar_outlined,
+                                size: 14,
+                                color: Colors.grey.shade500,
+                              ),
+                              const SizedBox(width: 4),
+                              Text(
+                                "${preds.length} objek terdeteksi",
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  color: Colors.grey.shade600,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 4),
+                          Row(
+                            children: [
+                              Icon(
+                                Icons.access_time_rounded,
+                                size: 14,
+                                color: Colors.grey.shade500,
+                              ),
+                              const SizedBox(width: 4),
+                              Text(
+                                _formatTimestamp(item["timestamp"]),
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.grey.shade500,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+
+                    // Arrow Icon
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: Colors.grey.shade50,
+                        shape: BoxShape.circle,
+                      ),
+                      child: Icon(
+                        Icons.arrow_forward_ios_rounded,
+                        size: 16,
+                        color: Colors.grey.shade400,
+                      ),
+                    ),
+                  ],
                 ),
               ),
-              if (best != null) ...[
-                const SizedBox(width: 8),
-                Container(
-                  width: 6,
-                  height: 6,
-                  decoration: BoxDecoration(
-                    color: _getScoreColor(best["score"]),
-                    shape: BoxShape.circle,
-                  ),
-                ),
-                const SizedBox(width: 6),
-                Text(
-                  "${(best["score"] * 100).toStringAsFixed(1)}%",
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: _getScoreColor(best["score"]),
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Text(
-                  "${preds.length} objek",
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.grey.shade600,
-                  ),
-                ),
-              ],
-            ],
+            ),
           ),
         ),
-        trailing: Icon(Icons.chevron_right, color: Colors.grey.shade400),
       ),
     );
   }
@@ -919,20 +1067,55 @@ class _HistoryPageState extends State<HistoryPage> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(Icons.history_outlined, size: 80, color: Colors.grey.shade400),
-          const SizedBox(height: 16),
-          Text(
-            "Belum ada riwayat",
+          Container(
+            padding: const EdgeInsets.all(32),
+            decoration: BoxDecoration(
+              color: Colors.purple.shade50,
+              shape: BoxShape.circle,
+            ),
+            child: Icon(
+              Icons.history_outlined,
+              size: 80,
+              color: Colors.purple.shade300,
+            ),
+          ),
+          const SizedBox(height: 24),
+          const Text(
+            "Belum Ada Riwayat",
             style: TextStyle(
-              fontSize: 18,
-              fontWeight: FontWeight.w600,
-              color: Colors.grey.shade600,
+              fontSize: 22,
+              fontWeight: FontWeight.bold,
+              color: Color(0xFF1A1A2E),
+              letterSpacing: -0.5,
             ),
           ),
           const SizedBox(height: 8),
           Text(
-            "Deteksi gambar akan muncul di sini",
-            style: TextStyle(fontSize: 14, color: Colors.grey.shade500),
+            "Hasil deteksi akan muncul di sini\nsetelah kamu melakukan scan",
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 14,
+              color: Colors.grey.shade600,
+              height: 1.5,
+            ),
+          ),
+          const SizedBox(height: 32),
+          ElevatedButton.icon(
+            onPressed: () => Navigator.pop(context),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.purple.shade600,
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+              elevation: 0,
+            ),
+            icon: const Icon(Icons.camera_alt_rounded),
+            label: const Text(
+              "Mulai Scan",
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            ),
           ),
         ],
       ),

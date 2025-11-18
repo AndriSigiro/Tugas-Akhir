@@ -1,4 +1,3 @@
-# app.py
 import os
 import time
 import base64
@@ -16,7 +15,7 @@ app = Flask(__name__)
 
 # Folders & Paths
 UPLOAD_FOLDER = "uploads"
-MODEL_PATH = os.path.join("Model", "best (7).pt")
+MODEL_PATH = os.path.join("Model", "best (12).pt")
 DB_NAME = "results.db"
 
 # Create upload folder
@@ -165,61 +164,40 @@ def run_yolo_detection(image_path):
 
 def draw_boxes_on_image(image_path, predictions):
     """
-    Draw bounding boxes on image and return base64 encoded result.
-    
-    Args:
-        image_path: Path to the image file
-        predictions: List of prediction dictionaries
-        
-    Returns:
-        str: Base64 encoded image with boxes
+    Draw ONLY bounding boxes on image - NO TEXT, NO LABELS, NO SCORES.
+    Color-coded: 
+    - Fertile = Green
+    - Unfertile = Orange
+    All prediction data sent separately to frontend via JSON
     """
-    # Load image
     img = cv2.imread(image_path)
     if img is None:
         raise ValueError(f"Failed to load image: {image_path}")
     
-    # Draw each bounding box
+    # KETEBAALAN TETAP SELALU 8 PIXEL (tidak peduli score!)
+    THICKNESS = 8
+
     for pred in predictions:
         if pred["box"]:
             x1, y1, x2, y2 = map(int, pred["box"])
-            label_text = f"{pred['label']} {pred['score']:.2f}"
+            label = pred['label'].lower()
             
-            # Draw rectangle (green) - thickness increased to 4
-            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 8)
-            
-            # Calculate label background size
-            (text_width, text_height), _ = cv2.getTextSize(
-                label_text, cv2.FONT_HERSHEY_SIMPLEX, 2.0, 4
-            )
-            
-            # Draw label background (black)
-            cv2.rectangle(
-                img,
-                (x1, y1 - text_height - 12),
-                (x1 + text_width + 10, y1),
-                (0, 0, 0),
-                -1
-            )
-            
-            # Draw label text (white) - thickness increased to 3
-            cv2.putText(
-                img,
-                label_text,
-                (x1 + 5, y1 - 6),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                2.0,
-                (255, 255, 255),
-                4
-            )
+            # Warna berdasarkan label
+            if 'unfertil' in label:
+                box_color = (0, 165, 255)  # Orange (BGR)
+            elif 'fertile' in label:
+                box_color = (0, 255, 0)    # Green (BGR) <-- tambahkan jika ada kelas fertile
+            else:
+                box_color = (128, 128, 128)  # Gray untuk unknown
+
+            # GAMBAR BOX DENGAN KETEKEBALAN TETAP
+            cv2.rectangle(img, (x1, y1), (x2, y2), box_color, THICKNESS)
     
-    # Encode to base64
-    _, buffer = cv2.imencode(".jpg", img)
+    # Encode ke base64
+    _, buffer = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
     img_base64 = base64.b64encode(buffer).decode('utf-8')
     
     return f"data:image/jpeg;base64,{img_base64}"
-
-
 # ==================== HELPER FUNCTIONS ====================
 def generate_record_id():
     """Generate unique record ID."""
@@ -245,8 +223,8 @@ def save_base64_image(image_b64, device_id, timestamp):
 
 def get_image_url_for_host(host):
     """Generate image URL based on request host."""
-    return f"http://{host}/latest"
-
+    # Sekarang gunakan /uploads/<file> supaya tiap record punya gambar sendiri
+    return f"http://{host}"
 
 # ==================== API ROUTES ====================
 @app.route("/upload", methods=["POST"])
@@ -359,17 +337,12 @@ def get_latest_image():
 
 @app.route("/result", methods=["GET"])
 def get_latest_result_json():
-    """
-    Get latest detection result as JSON.
-    
-    Returns:
-        JSON with detection info and image URL
-    """
     row = get_latest_result()
     if not row:
         return jsonify({"error": "No results found"}), 404
     
     predictions = json.loads(row[4])
+    base_url = f"http://{request.host}"
     
     response = {
         "id": row[0],
@@ -377,7 +350,7 @@ def get_latest_result_json():
         "timestamp": row[2],
         "file": row[3],
         "pred": predictions,
-        "image_url": get_image_url_for_host(request.host)
+        "image_url": f"{base_url}/uploads/{row[3]}"  # Juga pakai gambar asli
     }
     
     return jsonify(response)
@@ -401,6 +374,7 @@ def list_detection_results():
     rows = get_results_list(limit, offset)
     
     items = []
+    base_url = f"http://{request.host}"  # http://IP:9090
     for row in rows:
         items.append({
             "id": row[0],
@@ -408,7 +382,7 @@ def list_detection_results():
             "timestamp": row[2],
             "file": row[3],
             "pred": json.loads(row[4]),
-            "image_url": get_image_url_for_host(request.host)
+            "image_url": f"{base_url}/uploads/{row[3]}"  # GAMBAR PER RECORD!
         })
     
     return jsonify({"items": items, "count": len(items)})
@@ -422,7 +396,17 @@ def health_check():
         "model": MODEL_PATH,
         "timestamp": int(time.time())
     })
+# ==================== SERVE UPLOADS FOLDER (WAJIB!) ====================
+from flask import send_from_directory
 
+@app.route('/uploads/<path:filename>')
+def serve_uploads(filename):
+    """
+    Melayani file gambar dari folder uploads.
+    Contoh URL: http://IP:9090/uploads/manual_1732541234_abc.jpg
+    """
+    # Keamanan sederhana: hanya izinkan file yang ada di folder uploads
+    return send_from_directory(UPLOAD_FOLDER, filename)
 
 # ==================== MAIN ====================
 if __name__ == "__main__":
