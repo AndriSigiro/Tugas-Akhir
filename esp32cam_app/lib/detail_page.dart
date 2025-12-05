@@ -21,20 +21,55 @@ class DetailPage extends StatelessWidget {
   }
 
   String _formatDate(int timestamp) {
-    final date = DateTime.fromMillisecondsSinceEpoch(timestamp * 1000);
-    return "${date.day}/${date.month}/${date.year} • ${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}";
+    try {
+      final date = DateTime.fromMillisecondsSinceEpoch(timestamp * 1000);
+      return "${date.day}/${date.month}/${date.year} • ${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}";
+    } catch (e) {
+      return "Tanggal tidak valid";
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final preds = List<Map<String, dynamic>>.from(item["pred"]);
-    final best = preds.isNotEmpty
-        ? preds.reduce((a, b) => (a["score"] as num) > (b["score"] as num) ? a : b)
-        : {"label": "Unknown", "score": 0.0};
+    // ✅ ULTRA SAFE PARSING - INI YANG BIKIN ERROR HILANG!
+    List<Map<String, dynamic>> preds = [];
+    
+    // Check apakah 'pred' ada dan bukan null
+    if (item.containsKey("pred") && item["pred"] != null) {
+      final dynamic predData = item["pred"];
+      
+      // Check apakah pred adalah List
+      if (predData is List) {
+        preds = predData
+            .where((p) => p != null)
+            .where((p) => p is Map)
+            .cast<Map<String, dynamic>>()
+            .toList();
+      }
+    }
 
-    final label = best["label"] as String;
-    final score = (best["score"] as num).toDouble();
-    final imageUrl = item["image_url"] as String;
+    // ✅ SAFE best prediction
+    Map<String, dynamic> best = {"label": "Unknown", "score": 0.0};
+    if (preds.isNotEmpty) {
+      try {
+        best = preds.reduce((a, b) {
+          final scoreA = (a["score"] as num?)?.toDouble() ?? 0.0;
+          final scoreB = (b["score"] as num?)?.toDouble() ?? 0.0;
+          return scoreA > scoreB ? a : b;
+        });
+      } catch (e) {
+        debugPrint("Error reducing predictions: $e");
+      }
+    }
+
+    // ✅ SAFE extraction
+    final label = best["label"]?.toString() ?? "Unknown";
+    final score = (best["score"] as num?)?.toDouble() ?? 0.0;
+    final imageUrl = item["image_url"]?.toString() ?? "";
+    
+    // ✅ SAFE timestamp
+    final timestamp = (item["timestamp"] as int?) ?? 0;
+    final deviceId = item["device_id"]?.toString() ?? "Manual";
 
     return Scaffold(
       body: Container(
@@ -67,9 +102,11 @@ class DetailPage extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(width: 16),
-                    const Text(
-                      "Detail Hasil Deteksi",
-                      style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                    const Expanded(
+                      child: Text(
+                        "Detail Hasil Deteksi",
+                        style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                      ),
                     ),
                   ],
                 ),
@@ -94,7 +131,14 @@ class DetailPage extends StatelessWidget {
                           errorWidget: (_, __, ___) => Container(
                             height: 400,
                             color: Colors.grey.shade200,
-                            child: const Icon(Icons.error, size: 60),
+                            child: const Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(Icons.image_not_supported_outlined, size: 60, color: Colors.grey),
+                                SizedBox(height: 8),
+                                Text("Gambar tidak dapat dimuat", style: TextStyle(color: Colors.grey)),
+                              ],
+                            ),
                           ),
                           fit: BoxFit.cover,
                           width: double.infinity,
@@ -115,7 +159,9 @@ class DetailPage extends StatelessWidget {
                           child: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              Icon(_getLabelIcon(label), color: _getLabelColor(label), size: 48),
+                              Icon(_getLabelIcon(label), 
+                                   color: _getLabelColor(label), 
+                                   size: 48),
                               const SizedBox(width: 16),
                               Column(
                                 children: [
@@ -127,6 +173,15 @@ class DetailPage extends StatelessWidget {
                                       color: _getLabelColor(label),
                                     ),
                                   ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    "${(score * 100).toStringAsFixed(1)}% Confidence",
+                                    style: TextStyle(
+                                      fontSize: 14,
+                                      color: _getLabelColor(label),
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
                                 ],
                               ),
                             ],
@@ -136,9 +191,9 @@ class DetailPage extends StatelessWidget {
                       const SizedBox(height: 32),
 
                       // Info tambahan
-                      _buildInfoCard("Waktu Deteksi", _formatDate(item["timestamp"])),
-                      _buildInfoCard("Device ID", item["device_id"] ?? "Manual"),
-                      _buildInfoCard("Jumlah Objek", "${preds.length} telur terdeteksi"),
+                      _buildInfoCard("Waktu Deteksi", _formatDate(timestamp)),
+                      _buildInfoCard("Device ID", deviceId),
+                      _buildInfoCard("Jumlah Objek", "${preds.length} objek terdeteksi"),
 
                       const SizedBox(height: 24),
 
@@ -148,19 +203,88 @@ class DetailPage extends StatelessWidget {
                           "Detail Semua Deteksi",
                           style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                         ),
-                        const SizedBox(height: 12),
-                        ...preds.map((p) {
-                          final l = p["label"] as String;
-                          final s = (p["score"] as num).toDouble();
+                        const SizedBox(height: 16),
+                        ...preds.asMap().entries.map((entry) {
+                          final index = entry.key;
+                          final p = entry.value;
+                          
+                          final l = p["label"]?.toString() ?? "Unknown";
+                          final s = (p["score"] as num?)?.toDouble() ?? 0.0;
+                          
                           return Card(
-                            color: _getLabelColor(l).withOpacity(0.1),
+                            margin: const EdgeInsets.only(bottom: 8),
+                            color: _getLabelColor(l).withOpacity(0.08),
+                            elevation: 2,
                             child: ListTile(
-                              leading: Icon(_getLabelIcon(l), color: _getLabelColor(l)),
-                              title: Text(l, style: const TextStyle(fontWeight: FontWeight.w600)),
-                              trailing: Text("${(s * 100).toStringAsFixed(1)}%"),
+                              contentPadding: const EdgeInsets.all(16),
+                              leading: CircleAvatar(
+                                backgroundColor: _getLabelColor(l).withOpacity(0.2),
+                                child: Icon(_getLabelIcon(l), 
+                                          color: _getLabelColor(l)),
+                              ),
+                              title: Text(
+                                l,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 16,
+                                ),
+                              ),
+                              subtitle: Text(
+                                "Confidence: ${(s * 100).toStringAsFixed(1)}%",
+                                style: TextStyle(
+                                  color: _getLabelColor(l),
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                              trailing: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12, 
+                                  vertical: 6
+                                ),
+                                decoration: BoxDecoration(
+                                  color: _getLabelColor(l).withOpacity(0.1),
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                child: Text(
+                                  "#${index + 1}",
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold,
+                                    color: _getLabelColor(l),
+                                  ),
+                                ),
+                              ),
                             ),
                           );
-                        }),
+                        }).toList(),
+                      ] else if (preds.isEmpty) ...[
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(20),
+                          margin: const EdgeInsets.only(top: 16),
+                          decoration: BoxDecoration(
+                            color: Colors.orange.shade50,
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(color: Colors.orange.shade200),
+                          ),
+                          child: Row(
+                            children: [
+                              Icon(Icons.info_outline, 
+                                   color: Colors.orange.shade700, 
+                                   size: 28),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Text(
+                                  "Tidak ada prediksi yang ditemukan untuk gambar ini",
+                                  style: TextStyle(
+                                    color: Colors.orange.shade700,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
                       ],
                     ],
                   ),
@@ -176,13 +300,34 @@ class DetailPage extends StatelessWidget {
   Widget _buildInfoCard(String title, String value) {
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
+      elevation: 1,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+      ),
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text(title, style: const TextStyle(fontSize: 15, color: Colors.grey)),
-            Text(value, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+            Text(
+              title,
+              style: TextStyle(
+                fontSize: 15,
+                color: Colors.grey.shade600,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            Flexible(
+              child: Text(
+                value,
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF1A1A2E),
+                ),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
           ],
         ),
       ),

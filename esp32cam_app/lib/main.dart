@@ -11,7 +11,7 @@ void main() {
   runApp(const MyApp());
 }
 
-const String baseUrl = "http://172.18.215.92:9090";
+const String baseUrl = "http://192.168.50.133:9090";
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
@@ -107,7 +107,7 @@ class _HomePageState extends State<HomePage>
           _predictions = List<Map<String, dynamic>>.from(data["pred"]);
           _imageWithBoxesBase64 = data["image_with_boxes"];
           _latestImageUrl =
-              "$baseUrl/latest?ts=${DateTime.now().millisecondsSinceEpoch}";
+          "$baseUrl/latest?ts=${DateTime.now().millisecondsSinceEpoch}";
         });
       } else {
         _showSnackBar("Upload gagal: ${response.statusCode}", isError: true);
@@ -126,8 +126,9 @@ class _HomePageState extends State<HomePage>
         final data = jsonDecode(res.body);
         setState(() {
           _predictions = List<Map<String, dynamic>>.from(data["pred"]);
+          _imageWithBoxesBase64 = data["image_with_boxes"];
           _latestImageUrl =
-              "$baseUrl/latest?ts=${DateTime.now().millisecondsSinceEpoch}";
+          "$baseUrl/latest?ts=${DateTime.now().millisecondsSinceEpoch}";
         });
       }
     } catch (e) {
@@ -160,6 +161,29 @@ class _HomePageState extends State<HomePage>
   Map<String, dynamic>? get _bestPrediction {
     if (_predictions.isEmpty) return null;
     return _predictions.reduce((a, b) => (a["score"] > b["score"]) ? a : b);
+  }
+
+  Map<String, int> _countLabels() {
+    Map<String, int> counts = {"fertile": 0, "unfertile": 0};
+    for (var pred in _predictions) {
+      String label = pred["label"].toString().toLowerCase();
+      // Hanya hitung jika label adalah fertile atau unfertile
+      if (label == "fertile" || label == "unfertile") {
+        counts[label] = counts[label]! + 1;
+      }
+    }
+    return counts;
+  }
+
+  String _formatLabel(String label) {
+    switch (label.toLowerCase()) {
+      case "fertile":
+        return "Telur Fertil";
+      case "unfertile":
+        return "Telur Infertil";
+      default:
+        return label.toUpperCase();
+    }
   }
 
   // ========== UI Build Methods ==========
@@ -239,9 +263,9 @@ class _HomePageState extends State<HomePage>
           IconButton(
             onPressed:
                 () => Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (_) => const HistoryPage()),
-                ),
+              context,
+              MaterialPageRoute(builder: (_) => const HistoryPage()),
+            ),
             icon: Container(
               padding: const EdgeInsets.all(10),
               decoration: BoxDecoration(
@@ -388,23 +412,23 @@ class _HomePageState extends State<HomePage>
         width: double.infinity,
         color: Colors.black, // background hitam biar kelihatan rapi
         child:
-            isBase64
-                ? Image.memory(
-                  base64Decode(data!.split(',').last),
-                  fit:
-                      BoxFit.contain, // INI YANG MEMBUAT GAMBAR TIDAK DIPOTONG!
-                  gaplessPlayback: true,
-                  errorBuilder: (_, __, ___) => _buildFallbackImage(),
-                )
-                : CachedNetworkImage(
-                  imageUrl: url!,
-                  fit: BoxFit.contain, // SAMA PENTING DI SINI!
-                  placeholder:
-                      (context, url) => const Center(
-                        child: CircularProgressIndicator(color: Colors.white),
-                      ),
-                  errorWidget: (context, url, error) => _buildFallbackImage(),
-                ),
+        isBase64
+            ? Image.memory(
+          base64Decode(data!.split(',').last),
+          fit:
+          BoxFit.contain, // INI YANG MEMBUAT GAMBAR TIDAK DIPOTONG!
+          gaplessPlayback: true,
+          errorBuilder: (_, __, ___) => _buildFallbackImage(),
+        )
+            : CachedNetworkImage(
+          imageUrl: url!,
+          fit: BoxFit.contain, // SAMA PENTING DI SINI!
+          placeholder:
+              (context, url) => const Center(
+            child: CircularProgressIndicator(color: Colors.white),
+          ),
+          errorWidget: (context, url, error) => _buildFallbackImage(),
+        ),
       ),
     );
   }
@@ -425,7 +449,7 @@ class _HomePageState extends State<HomePage>
             const Icon(Icons.egg, color: Colors.white, size: 18),
             const SizedBox(width: 6),
             Text(
-              "${_predictions.length} telur",
+              "${_countLabels()['fertile']! + _countLabels()['unfertile']!} telur",
               style: const TextStyle(
                 color: Colors.white,
                 fontWeight: FontWeight.bold,
@@ -492,7 +516,16 @@ class _HomePageState extends State<HomePage>
   }
 
   Widget _buildResultContainer() {
-    final best = _bestPrediction!;
+    final labelCounts = _countLabels();
+    final fertileCount = labelCounts["fertile"] ?? 0;
+    final unfertileCount = labelCounts["unfertile"] ?? 0;
+    final totalCount = fertileCount + unfertileCount; // Hanya hitung fertile + unfertile
+
+    // Jika tidak ada telur valid yang terdeteksi, tampilkan pesan
+    if (totalCount == 0) {
+      return _buildNoDetection();
+    }
+
     return Container(
       padding: const EdgeInsets.all(24),
       decoration: BoxDecoration(
@@ -507,22 +540,24 @@ class _HomePageState extends State<HomePage>
         ],
       ),
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // Header
           Row(
             children: [
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
-                  color: _getLabelColor(best["label"]).withOpacity(0.1),
+                  color: Colors.blue.shade50,
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: Icon(
-                  Icons.check_circle,
-                  color: _getLabelColor(best["label"]),
-                  size: 32,
+                  Icons.analytics_outlined,
+                  color: Colors.blue.shade600,
+                  size: 28,
                 ),
               ),
-              const SizedBox(width: 16),
+              const SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -532,22 +567,16 @@ class _HomePageState extends State<HomePage>
                       style: TextStyle(
                         fontSize: 14,
                         color: Colors.grey.shade600,
+                        fontWeight: FontWeight.w500,
                       ),
                     ),
-                    const SizedBox(height: 4),
+                    const SizedBox(height: 2),
                     Text(
-                      best["label"],
+                      "$totalCount Telur Terdeteksi",
                       style: const TextStyle(
-                        fontSize: 24,
+                        fontSize: 20,
                         fontWeight: FontWeight.bold,
                         color: Color(0xFF1A1A2E),
-                      ),
-                    ),
-                    Text(
-                      "${_predictions.length} objek terdeteksi",
-                      style: TextStyle(
-                        fontSize: 14,
-                        color: Colors.grey.shade600,
                       ),
                     ),
                   ],
@@ -555,14 +584,135 @@ class _HomePageState extends State<HomePage>
               ),
             ],
           ),
-          const SizedBox(height: 20),
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: Colors.grey.shade50,
-              borderRadius: BorderRadius.circular(12),
-            ),
+
+          const SizedBox(height: 24),
+
+          // Cards untuk Fertile dan Unfertile
+          Row(
+            children: [
+              // Card Fertile
+              Expanded(
+                child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [
+                        Colors.green.shade50,
+                        Colors.green.shade100.withOpacity(0.5),
+                      ],
+                    ),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(
+                      color: Colors.green.withOpacity(0.2),
+                      width: 1.5,
+                    ),
+                  ),
+                  child: Column(
+                    children: [
+                      Icon(
+                        Icons.check_circle_rounded,
+                        color: Colors.green.shade700,
+                        size: 32,
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        "$fertileCount",
+                        style: TextStyle(
+                          fontSize: 32,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.green.shade700,
+                          height: 1,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        "Fertil",
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.green.shade700,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        "Dapat Ditetaskan",
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.green.shade600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
+              const SizedBox(width: 12),
+
+              // Card Unfertile
+              Expanded(
+                child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [
+                        Colors.orange.shade50,
+                        Colors.orange.shade100.withOpacity(0.5),
+                      ],
+                    ),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(
+                      color: Colors.orange.withOpacity(0.2),
+                      width: 1.5,
+                    ),
+                  ),
+                  child: Column(
+                    children: [
+                      Icon(
+                        Icons.cancel_rounded,
+                        color: Colors.orange.shade700,
+                        size: 32,
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        "$unfertileCount",
+                        style: TextStyle(
+                          fontSize: 32,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.orange.shade700,
+                          height: 1,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        "Infertil",
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.orange.shade700,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        "Tidak Dapat Ditetaskan",
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.orange.shade600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
           ),
+
+          const SizedBox(height: 16),
         ],
       ),
     );
@@ -673,7 +823,6 @@ class _HomePageState extends State<HomePage>
     );
   }
 }
-
 // ==================== HISTORY PAGE ====================
 class HistoryPage extends StatefulWidget {
   const HistoryPage({super.key});
@@ -698,7 +847,7 @@ class _HistoryPageState extends State<HistoryPage> {
       final res = await http.get(Uri.parse("$baseUrl/results?limit=20"));
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body);
-        setState(() => items = data["items"]);
+        setState(() => items = data["items"] ?? []); // ← TAMBAH NULL CHECK
       }
     } catch (e) {
       debugPrint("Error fetchHistory: $e");
@@ -724,11 +873,10 @@ class _HistoryPageState extends State<HistoryPage> {
 
   Color _getLabelColor(String label) {
     final lowerLabel = label.toLowerCase();
-    if (lowerLabel.contains('fertile')) {
+    if (lowerLabel.contains('fertile') && !lowerLabel.contains('unfertil')) {
       return Colors.green;
-    } else if (lowerLabel.contains('unfertil') ||
-        lowerLabel.contains('unfertile')) {
-      return Colors.orange.shade700; // Orange gelap biar kelihatan bagus
+    } else if (lowerLabel.contains('unfertil')) {
+      return Colors.orange.shade700;
     } else {
       return Colors.grey;
     }
@@ -865,15 +1013,39 @@ class _HistoryPageState extends State<HistoryPage> {
   }
 
   Widget _buildHistoryItem(Map<String, dynamic> item, int index) {
-    final preds = List<Map<String, dynamic>>.from(item["pred"]);
-    final best =
-        preds.isNotEmpty
-            ? preds.reduce((a, b) => a["score"] > b["score"] ? a : b)
-            : null;
+    // ✅ FIX: Tambah null check dan type casting yang aman
+    final predData = item["pred"];
+    List<Map<String, dynamic>> preds = [];
+    
+    if (predData != null) {
+      if (predData is List) {
+        preds = predData.map((e) {
+          if (e is Map<String, dynamic>) {
+            return e;
+          }
+          return <String, dynamic>{};
+        }).toList();
+      }
+    }
+
+    // ✅ FIX: Cari best prediction dengan aman
+    Map<String, dynamic>? best;
+    if (preds.isNotEmpty) {
+      try {
+        best = preds.reduce((a, b) {
+          final aScore = (a["score"] ?? 0) as num;
+          final bScore = (b["score"] ?? 0) as num;
+          return aScore > bScore ? a : b;
+        });
+      } catch (e) {
+        debugPrint("Error finding best prediction: $e");
+      }
+    }
 
     final label = best?["label"] ?? "Unknown";
     final labelColor = best != null ? _getLabelColor(label) : Colors.grey;
-    final imageUrl = "${item["image_url"]}";
+    final imageUrl = item["image_url"] ?? "";
+
     return TweenAnimationBuilder(
       duration: Duration(milliseconds: 300 + (index * 50)),
       tween: Tween<double>(begin: 0, end: 1),
@@ -927,11 +1099,36 @@ class _HistoryPageState extends State<HistoryPage> {
                       ),
                       child: ClipRRect(
                         borderRadius: BorderRadius.circular(14),
-                        child: Image.network(
-                          imageUrl,
-                          fit: BoxFit.cover,
-                          errorBuilder:
-                              (_, __, ___) => Container(
+                        child: imageUrl.isNotEmpty
+                            ? Image.network(
+                                imageUrl,
+                                fit: BoxFit.cover,
+                                errorBuilder: (_, __, ___) => Container(
+                                  color: Colors.grey.shade100,
+                                  child: Icon(
+                                    Icons.egg_outlined,
+                                    size: 36,
+                                    color: Colors.grey.shade400,
+                                  ),
+                                ),
+                                loadingBuilder: (_, child, loadingProgress) {
+                                  if (loadingProgress == null) return child;
+                                  return Container(
+                                    color: Colors.grey.shade100,
+                                    child: Center(
+                                      child: SizedBox(
+                                        width: 24,
+                                        height: 24,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          color: Colors.grey.shade400,
+                                        ),
+                                      ),
+                                    ),
+                                  );
+                                },
+                              )
+                            : Container(
                                 color: Colors.grey.shade100,
                                 child: Icon(
                                   Icons.egg_outlined,
@@ -939,23 +1136,6 @@ class _HistoryPageState extends State<HistoryPage> {
                                   color: Colors.grey.shade400,
                                 ),
                               ),
-                          loadingBuilder: (_, child, loadingProgress) {
-                            if (loadingProgress == null) return child;
-                            return Container(
-                              color: Colors.grey.shade100,
-                              child: Center(
-                                child: SizedBox(
-                                  width: 24,
-                                  height: 24,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                    color: Colors.grey.shade400,
-                                  ),
-                                ),
-                              ),
-                            );
-                          },
-                        ),
                       ),
                     ),
                     const SizedBox(width: 16),
@@ -965,39 +1145,6 @@ class _HistoryPageState extends State<HistoryPage> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          // Status Badge
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 12,
-                              vertical: 6,
-                            ),
-                            decoration: BoxDecoration(
-                              color: labelColor.withOpacity(0.1),
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(
-                                  _getLabelIcon(label),
-                                  size: 16,
-                                  color: labelColor,
-                                ),
-                                const SizedBox(width: 6),
-                                Text(
-                                  label.toUpperCase(),
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.bold,
-                                    color: labelColor,
-                                    letterSpacing: 0.5,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(height: 10),
-
                           // Object count & Time
                           Row(
                             children: [
@@ -1027,7 +1174,7 @@ class _HistoryPageState extends State<HistoryPage> {
                               ),
                               const SizedBox(width: 4),
                               Text(
-                                _formatTimestamp(item["timestamp"]),
+                                _formatTimestamp(item["timestamp"] ?? 0),
                                 style: TextStyle(
                                   fontSize: 12,
                                   color: Colors.grey.shade500,

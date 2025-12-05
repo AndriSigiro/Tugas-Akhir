@@ -5,10 +5,11 @@ import sqlite3
 import uuid
 import json
 import io
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, send_from_directory
 from ultralytics import YOLO
 import cv2
 import numpy as np
+from collections import defaultdict
 
 # ==================== CONFIGURATION ====================
 app = Flask(__name__)
@@ -31,70 +32,78 @@ print(f"✅ Model loaded: {MODEL_PATH}")
 def get_db_connection():
     """Create and return database connection."""
     conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
     
-    # Create table if not exists
+    # Create table with FLAT structure (satu baris = satu deteksi)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS results(
-            id TEXT PRIMARY KEY,
+            id TEXT NOT NULL,
             device_id TEXT,
             ts INTEGER,
             file TEXT,
-            pred TEXT
+            label TEXT,
+            score REAL,
+            box_x1 REAL,
+            box_y1 REAL,
+            box_x2 REAL,
+            box_y2 REAL
         );
     """)
     
-    # Check if 'pred' column exists, if not migrate
-    try:
-        cursor = conn.execute("SELECT pred FROM results LIMIT 1")
-    except sqlite3.OperationalError:
-        # Column doesn't exist, need to migrate
-        print("🔄 Migrating database: adding 'pred' column...")
-        try:
-            # Try to add column to existing table
-            conn.execute("ALTER TABLE results ADD COLUMN pred TEXT")
-            conn.commit()
-            print("✅ Database migration completed")
-        except sqlite3.OperationalError as e:
-            # If table structure is too different, backup and recreate
-            print(f"⚠️  Migration failed: {e}")
-            print("🔄 Creating backup and recreating table...")
-            
-            # Backup existing data
-            conn.execute("ALTER TABLE results RENAME TO results_backup")
-            
-            # Create new table with correct structure
-            conn.execute("""
-                CREATE TABLE results(
-                    id TEXT PRIMARY KEY,
-                    device_id TEXT,
-                    ts INTEGER,
-                    file TEXT,
-                    pred TEXT
-                );
-            """)
-            
-            # Try to migrate data if possible
-            try:
-                conn.execute("""
-                    INSERT INTO results(id, device_id, ts, file, pred)
-                    SELECT id, device_id, ts, file, '[]' FROM results_backup
-                """)
-                print("✅ Data migrated successfully")
-            except:
-                print("⚠️  Could not migrate old data, starting fresh")
-            
-            conn.commit()
+    # Create index untuk query cepat
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_results_id_ts 
+        ON results(id, ts DESC);
+    """)
     
+    conn.commit()
     return conn
 
 
 def save_detection_to_db(record_id, device_id, timestamp, filename, predictions):
-    """Save detection result to database."""
+    """Save detection result to database - FLAT structure."""
     conn = get_db_connection()
-    conn.execute(
-        "INSERT INTO results(id, device_id, ts, file, pred) VALUES(?, ?, ?, ?, ?)",
-        (record_id, device_id, timestamp, filename, json.dumps(predictions))
-    )
+    cursor = conn.cursor()
+    
+    # Hapus data lama dengan record_id yang sama (jika re-upload)
+    cursor.execute("DELETE FROM results WHERE id = ?", (record_id,))
+    
+    # Insert setiap deteksi sebagai baris terpisah
+    for pred in predictions:
+        label = pred.get("label", "unknown")
+        score = pred.get("score", 0.0)
+        box = pred.get("box", [])
+        
+        # Skip unknown detections
+        if label == "unknown":
+            continue
+        
+        # Extract box coordinates
+        x1, y1, x2, y2 = (box[0], box[1], box[2], box[3]) if len(box) == 4 else (0, 0, 0, 0)
+        
+        cursor.execute("""
+            INSERT INTO results (id, device_id, ts, file, label, score, box_x1, box_y1, box_x2, box_y2)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            record_id,
+            device_id,
+            timestamp,
+            filename,
+            label,
+            round(score, 4),
+            round(x1, 2),
+            round(y1, 2),
+            round(x2, 2),
+            round(y2, 2)
+        ))
+    
+    # Jika tidak ada deteksi valid, simpan satu baris "no_detection"
+    if not predictions or all(p.get("label") == "unknown" for p in predictions):
+        cursor.execute("""
+            INSERT INTO results (id, device_id, ts, file, label, score, box_x1, box_y1, box_x2, box_y2)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (record_id, device_id, timestamp, filename, "no_detection", 0.0, 0, 0, 0, 0))
+    
     conn.commit()
     conn.close()
 
@@ -102,39 +111,107 @@ def save_detection_to_db(record_id, device_id, timestamp, filename, predictions)
 def get_latest_result():
     """Get latest detection result from database."""
     conn = get_db_connection()
-    cur = conn.execute(
-        "SELECT id, device_id, ts, file, pred FROM results ORDER BY ts DESC LIMIT 1"
-    )
+    
+    # Get latest timestamp
+    cur = conn.execute("SELECT MAX(ts) as max_ts FROM results")
     row = cur.fetchone()
+    
+    if not row or not row["max_ts"]:
+        conn.close()
+        return None
+    
+    latest_ts = row["max_ts"]
+    
+    # Get all detections for that timestamp
+    cur = conn.execute("""
+        SELECT id, device_id, ts, file, label, score, box_x1, box_y1, box_x2, box_y2
+        FROM results 
+        WHERE ts = ?
+        ORDER BY score DESC
+    """, (latest_ts,))
+    
+    rows = cur.fetchall()
     conn.close()
-    return row
+    
+    if not rows:
+        return None
+    
+    # Group into single record with predictions array
+    first = rows[0]
+    predictions = []
+    for r in rows:
+        predictions.append({
+            "label": r["label"],
+            "score": r["score"],
+            "box": [r["box_x1"], r["box_y1"], r["box_x2"], r["box_y2"]]
+        })
+    
+    return {
+        "id": first["id"],
+        "device_id": first["device_id"],
+        "timestamp": first["ts"],
+        "file": first["file"],
+        "pred": predictions
+    }
 
 
 def get_results_list(limit=20, offset=0):
-    """Get list of detection results with pagination."""
+    """Get list of detection results with pagination - GROUPED by record."""
     conn = get_db_connection()
-    cur = conn.execute(
-        "SELECT id, device_id, ts, file, pred FROM results ORDER BY ts DESC LIMIT ? OFFSET ?",
-        (limit, offset)
-    )
-    rows = cur.fetchall()
+    
+    # Get unique records ordered by timestamp
+    cur = conn.execute("""
+        SELECT DISTINCT id, device_id, ts, file
+        FROM results 
+        GROUP BY id
+        ORDER BY ts DESC
+        LIMIT ? OFFSET ?
+    """, (limit, offset))
+    
+    records = cur.fetchall()
+    
+    # For each record, get all its detections
+    result_list = []
+    for record in records:
+        record_id = record["id"]
+        
+        # Get all detections for this record
+        det_cur = conn.execute("""
+            SELECT label, score, box_x1, box_y1, box_x2, box_y2
+            FROM results
+            WHERE id = ?
+            ORDER BY score DESC
+        """, (record_id,))
+        
+        detections = det_cur.fetchall()
+        
+        # Build predictions array
+        predictions = []
+        for det in detections:
+            predictions.append({
+                "label": det["label"],
+                "score": det["score"],
+                "box": [det["box_x1"], det["box_y1"], det["box_x2"], det["box_y2"]]
+            })
+        
+        result_list.append({
+            "id": record["id"],
+            "device_id": record["device_id"],
+            "timestamp": record["ts"],
+            "file": record["file"],
+            "pred": predictions
+        })
+    
     conn.close()
-    return rows
+    return result_list
 
 
 # ==================== YOLO INFERENCE ====================
 def run_yolo_detection(image_path):
-    """
-    Run YOLO inference and draw bounding boxes on image.
-    
-    Returns:
-        tuple: (predictions_list, image_with_boxes_base64)
-    """
-    # TAMBAHKAN CONF THRESHOLD DI SINI (0.5 = 50%)
+    """Run YOLO inference and draw bounding boxes on image."""
     results = yolo_model.predict(source=image_path, save=False, verbose=True, conf=0.5)
     print(f"[YOLO] Running inference on: {image_path}")
     
-    # Extract predictions
     predictions = []
     if results and results[0].boxes and len(results[0].boxes) > 0:
         for box in results[0].boxes:
@@ -142,8 +219,7 @@ def run_yolo_detection(image_path):
             score = float(box.conf)
             xyxy = box.xyxy.cpu().numpy()[0].tolist()
             
-            # FILTER TAMBAHAN: Hanya ambil confidence >= 0.6 (60%)
-            if score >= 0.6:  # <-- TAMBAHKAN INI
+            if score >= 0.6:
                 predictions.append({
                     "label": label,
                     "score": score,
@@ -151,53 +227,43 @@ def run_yolo_detection(image_path):
                 })
                 print(f"[YOLO] Detected: {label} (confidence: {score:.2f})")
     
-    # If no detection found
     if not predictions:
         print("[YOLO] No objects detected")
         predictions = [{"label": "unknown", "score": 0.0, "box": []}]
     
-    # Draw boxes on image
     image_with_boxes = draw_boxes_on_image(image_path, predictions)
     
     return predictions, image_with_boxes
 
 
 def draw_boxes_on_image(image_path, predictions):
-    """
-    Draw ONLY bounding boxes on image - NO TEXT, NO LABELS, NO SCORES.
-    Color-coded: 
-    - Fertile = Green
-    - Unfertile = Orange
-    All prediction data sent separately to frontend via JSON
-    """
+    """Draw bounding boxes on image."""
     img = cv2.imread(image_path)
     if img is None:
         raise ValueError(f"Failed to load image: {image_path}")
     
-    # KETEBAALAN TETAP SELALU 8 PIXEL (tidak peduli score!)
     THICKNESS = 8
 
     for pred in predictions:
-        if pred["box"]:
+        if pred["box"] and len(pred["box"]) == 4:
             x1, y1, x2, y2 = map(int, pred["box"])
             label = pred['label'].lower()
             
-            # Warna berdasarkan label
             if 'unfertil' in label:
-                box_color = (0, 165, 255)  # Orange (BGR)
+                box_color = (0, 165, 255)  # Orange
             elif 'fertile' in label:
-                box_color = (0, 255, 0)    # Green (BGR) <-- tambahkan jika ada kelas fertile
+                box_color = (0, 255, 0)    # Green
             else:
-                box_color = (128, 128, 128)  # Gray untuk unknown
+                box_color = (128, 128, 128)  # Gray
 
-            # GAMBAR BOX DENGAN KETEKEBALAN TETAP
             cv2.rectangle(img, (x1, y1), (x2, y2), box_color, THICKNESS)
     
-    # Encode ke base64
     _, buffer = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
     img_base64 = base64.b64encode(buffer).decode('utf-8')
     
     return f"data:image/jpeg;base64,{img_base64}"
+
+
 # ==================== HELPER FUNCTIONS ====================
 def generate_record_id():
     """Generate unique record ID."""
@@ -205,12 +271,7 @@ def generate_record_id():
 
 
 def save_base64_image(image_b64, device_id, timestamp):
-    """
-    Save base64 encoded image to file.
-    
-    Returns:
-        str: Path to saved file
-    """
+    """Save base64 encoded image to file."""
     raw = base64.b64decode(image_b64)
     filename = f"{device_id}_{timestamp}.jpg"
     filepath = os.path.join(UPLOAD_FOLDER, filename)
@@ -221,24 +282,10 @@ def save_base64_image(image_b64, device_id, timestamp):
     return filename, filepath
 
 
-def get_image_url_for_host(host):
-    """Generate image URL based on request host."""
-    # Sekarang gunakan /uploads/<file> supaya tiap record punya gambar sendiri
-    return f"http://{host}"
-
 # ==================== API ROUTES ====================
 @app.route("/upload", methods=["POST"])
 def upload_base64():
-    """
-    Upload image via JSON (ESP32-CAM base64).
-    
-    Expected JSON format:
-    {
-        "device_id": "esp32_01",
-        "timestamp": 1234567890,
-        "image": "base64_encoded_image"
-    }
-    """
+    """Upload image via JSON (ESP32-CAM base64)."""
     try:
         data = request.get_json(force=True)
         device_id = data.get("device_id", "unknown")
@@ -248,13 +295,9 @@ def upload_base64():
         if not image_b64:
             return jsonify({"error": "No image data provided"}), 400
         
-        # Save image
         filename, filepath = save_base64_image(image_b64, device_id, timestamp)
-        
-        # Run YOLO detection
         predictions, image_with_boxes = run_yolo_detection(filepath)
         
-        # Save to database
         record_id = generate_record_id()
         save_detection_to_db(record_id, device_id, timestamp, filename, predictions)
         
@@ -273,12 +316,7 @@ def upload_base64():
 
 @app.route("/upload-file", methods=["POST"])
 def upload_file():
-    """
-    Upload image via multipart file (Flutter/Web).
-    
-    Expected form-data:
-    - file: image file
-    """
+    """Upload image via multipart file (Flutter/Web)."""
     try:
         if "file" not in request.files:
             return jsonify({"error": "No file uploaded"}), 400
@@ -287,16 +325,13 @@ def upload_file():
         if file.filename == "":
             return jsonify({"error": "Empty filename"}), 400
         
-        # Save file
         timestamp = int(time.time())
         filename = f"manual_{timestamp}_{file.filename}"
         filepath = os.path.join(UPLOAD_FOLDER, filename)
         file.save(filepath)
         
-        # Run YOLO detection
         predictions, image_with_boxes = run_yolo_detection(filepath)
         
-        # Save to database
         record_id = generate_record_id()
         save_detection_to_db(record_id, "manual", timestamp, filename, predictions)
         
@@ -315,42 +350,34 @@ def upload_file():
 
 @app.route("/latest", methods=["GET"])
 def get_latest_image():
-    """
-    Get latest detected image with bounding boxes.
-    
-    Returns:
-        image/jpeg: Latest image with detection boxes
-    """
-    row = get_latest_result()
-    if not row:
+    """Get latest detected image with bounding boxes."""
+    result = get_latest_result()
+    if not result:
         return jsonify({"error": "No images found"}), 404
     
-    filepath = os.path.join(UPLOAD_FOLDER, row[3])
-    
-    # Re-run detection to draw boxes (or use cached if optimized)
+    filepath = os.path.join(UPLOAD_FOLDER, result["file"])
     _, image_with_boxes = run_yolo_detection(filepath)
     
-    # Decode base64 and send as image
     image_data = base64.b64decode(image_with_boxes.split(',')[1])
     return send_file(io.BytesIO(image_data), mimetype="image/jpeg")
 
 
 @app.route("/result", methods=["GET"])
 def get_latest_result_json():
-    row = get_latest_result()
-    if not row:
+    """Get latest detection result as JSON."""
+    result = get_latest_result()
+    if not result:
         return jsonify({"error": "No results found"}), 404
     
-    predictions = json.loads(row[4])
     base_url = f"http://{request.host}"
     
     response = {
-        "id": row[0],
-        "device_id": row[1],
-        "timestamp": row[2],
-        "file": row[3],
-        "pred": predictions,
-        "image_url": f"{base_url}/uploads/{row[3]}"  # Juga pakai gambar asli
+        "id": result["id"],
+        "device_id": result["device_id"],
+        "timestamp": result["timestamp"],
+        "file": result["file"],
+        "pred": result["pred"],
+        "image_url": f"{base_url}/uploads/{result['file']}"
     }
     
     return jsonify(response)
@@ -358,34 +385,56 @@ def get_latest_result_json():
 
 @app.route("/results", methods=["GET"])
 def list_detection_results():
-    """
-    Get list of detection results with pagination.
-    
-    Query params:
-    - limit: Number of results (default: 20)
-    - offset: Offset for pagination (default: 0)
-    
-    Returns:
-        JSON list of detection results
-    """
+    """Get list of detection results with pagination."""
     limit = int(request.args.get("limit", 20))
     offset = int(request.args.get("offset", 0))
     
-    rows = get_results_list(limit, offset)
+    results = get_results_list(limit, offset)
     
+    base_url = f"http://{request.host}"
     items = []
-    base_url = f"http://{request.host}"  # http://IP:9090
-    for row in rows:
+    
+    for result in results:
         items.append({
-            "id": row[0],
-            "device_id": row[1],
-            "timestamp": row[2],
-            "file": row[3],
-            "pred": json.loads(row[4]),
-            "image_url": f"{base_url}/uploads/{row[3]}"  # GAMBAR PER RECORD!
+            "id": result["id"],
+            "device_id": result["device_id"],
+            "timestamp": result["timestamp"],
+            "file": result["file"],
+            "pred": result["pred"],
+            "image_url": f"{base_url}/uploads/{result['file']}"
         })
     
-    return jsonify({"items": items, "count": len(items)})
+    return jsonify({
+        "items": items,
+        "count": len(items)
+    })
+
+
+@app.route("/latest-detection", methods=["GET"])
+def get_latest_detection():
+    """Get latest detection with complete info."""
+    result = get_latest_result()
+    if not result:
+        return jsonify({"error": "No detection found"}), 404
+    
+    filepath = os.path.join(UPLOAD_FOLDER, result["file"])
+    _, image_with_boxes = run_yolo_detection(filepath)
+    
+    base_url = f"http://{request.host}"
+    source = "camera" if result["device_id"].startswith("esp32") else "mobile"
+    
+    return jsonify({
+        "status": "success",
+        "id": result["id"],
+        "device_id": result["device_id"],
+        "timestamp": result["timestamp"],
+        "source": source,
+        "file": result["file"],
+        "predictions": result["pred"],
+        "image_url": f"{base_url}/uploads/{result['file']}",
+        "image_with_boxes": image_with_boxes,
+        "total_detections": len([p for p in result["pred"] if p["label"] != "unknown" and p["label"] != "no_detection"])
+    }), 200
 
 
 @app.route("/health", methods=["GET"])
@@ -396,21 +445,16 @@ def health_check():
         "model": MODEL_PATH,
         "timestamp": int(time.time())
     })
-# ==================== SERVE UPLOADS FOLDER (WAJIB!) ====================
-from flask import send_from_directory
+
 
 @app.route('/uploads/<path:filename>')
 def serve_uploads(filename):
-    """
-    Melayani file gambar dari folder uploads.
-    Contoh URL: http://IP:9090/uploads/manual_1732541234_abc.jpg
-    """
-    # Keamanan sederhana: hanya izinkan file yang ada di folder uploads
+    """Serve uploaded images."""
     return send_from_directory(UPLOAD_FOLDER, filename)
+
 
 # ==================== MAIN ====================
 if __name__ == "__main__":
-    # Run server accessible from LAN (ESP32 & Mobile)
     print("🚀 Starting Flask YOLO Detection Server...")
     print(f"📁 Upload folder: {UPLOAD_FOLDER}")
     print(f"🗃️ Database: {DB_NAME}")
