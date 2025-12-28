@@ -5,6 +5,7 @@ import sqlite3
 import uuid
 import json
 import io
+import requests
 from flask import Flask, request, jsonify, send_file, send_from_directory
 from ultralytics import YOLO
 import cv2
@@ -18,6 +19,11 @@ app = Flask(__name__)
 UPLOAD_FOLDER = "uploads"
 MODEL_PATH = os.path.join("Model", "best (12).pt")
 DB_NAME = "results.db"
+
+# 🆕 ESP32-CAM Configuration
+ESP32_CAM_IP = "10.65.135.92"  # 🔧 GANTI dengan IP ESP32-CAM Anda!
+ESP32_CAM_PORT = 80
+ESP32_CAPTURE_ENDPOINT = f"http://{ESP32_CAM_IP}:{ESP32_CAM_PORT}/capture"
 
 # Create upload folder
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -282,6 +288,60 @@ def save_base64_image(image_b64, device_id, timestamp):
     return filename, filepath
 
 
+# 🆕 ==================== ESP32-CAM FUNCTIONS ====================
+def request_esp32_capture():
+    """
+    Send request to ESP32-CAM to capture image.
+    Returns: (success: bool, image_data: bytes or None, error_message: str or None)
+    """
+    try:
+        print(f"[ESP32] Requesting capture from {ESP32_CAPTURE_ENDPOINT}...")
+        
+        # Request ke ESP32-CAM dengan timeout 15 detik
+        response = requests.get(
+            ESP32_CAPTURE_ENDPOINT,
+            timeout=15
+        )
+        
+        if response.status_code == 200:
+            # Cek apakah response adalah image
+            content_type = response.headers.get('Content-Type', '')
+            
+            if 'image' in content_type:
+                print(f"[ESP32] ✅ Image received ({len(response.content)} bytes)")
+                return True, response.content, None
+            else:
+                # Mungkin ESP32 kirim JSON atau text
+                try:
+                    data = response.json()
+                    if 'image' in data:
+                        # Base64 encoded image
+                        image_data = base64.b64decode(data['image'])
+                        print(f"[ESP32] ✅ Base64 image received ({len(image_data)} bytes)")
+                        return True, image_data, None
+                except:
+                    pass
+                
+                print(f"[ESP32] ❌ Invalid response format: {content_type}")
+                return False, None, "ESP32 response bukan format image"
+        
+        else:
+            print(f"[ESP32] ❌ HTTP Error: {response.status_code}")
+            return False, None, f"ESP32 error: {response.status_code}"
+    
+    except requests.exceptions.Timeout:
+        print("[ESP32] ❌ Timeout waiting for ESP32-CAM")
+        return False, None, "ESP32-CAM timeout (tidak merespon dalam 15 detik)"
+    
+    except requests.exceptions.ConnectionError:
+        print(f"[ESP32] ❌ Cannot connect to {ESP32_CAPTURE_ENDPOINT}")
+        return False, None, f"Tidak dapat terhubung ke ESP32-CAM di {ESP32_CAM_IP}"
+    
+    except Exception as e:
+        print(f"[ESP32] ❌ Error: {str(e)}")
+        return False, None, f"Error: {str(e)}"
+
+
 # ==================== API ROUTES ====================
 @app.route("/upload", methods=["POST"])
 def upload_base64():
@@ -346,6 +406,71 @@ def upload_file():
     except Exception as e:
         print(f"[ERROR] Upload file failed: {str(e)}")
         return jsonify({"error": str(e)}), 500
+
+
+# 🆕 ==================== ESP32-CAM TRIGGER ENDPOINT ====================
+@app.route("/trigger-camera", methods=["POST"])
+def trigger_camera():
+    """
+    🆕 Endpoint untuk memicu ESP32-CAM mengambil foto.
+    Flutter -> Flask -> ESP32-CAM -> Flask (process) -> Flutter
+    """
+    try:
+        print("\n" + "="*50)
+        print("🎬 TRIGGER CAMERA REQUEST RECEIVED")
+        print("="*50)
+        
+        # 1. Request foto ke ESP32-CAM
+        success, image_data, error_msg = request_esp32_capture()
+        
+        if not success:
+            return jsonify({
+                "status": "error",
+                "message": error_msg or "Failed to capture from ESP32-CAM"
+            }), 500
+        
+        # 2. Simpan gambar dari ESP32-CAM
+        timestamp = int(time.time())
+        device_id = "esp32_cam"
+        filename = f"esp32_{timestamp}.jpg"
+        filepath = os.path.join(UPLOAD_FOLDER, filename)
+        
+        with open(filepath, "wb") as f:
+            f.write(image_data)
+        
+        print(f"[SAVE] Image saved to: {filepath}")
+        
+        # 3. Jalankan deteksi YOLO
+        predictions, image_with_boxes = run_yolo_detection(filepath)
+        
+        # 4. Simpan ke database
+        record_id = generate_record_id()
+        save_detection_to_db(record_id, device_id, timestamp, filename, predictions)
+        
+        print(f"[DB] Saved to database with ID: {record_id}")
+        print("="*50 + "\n")
+        
+        # 5. Return hasil ke Flutter
+        return jsonify({
+            "status": "success",
+            "message": "Photo captured and processed successfully",
+            "id": record_id,
+            "device_id": device_id,
+            "timestamp": timestamp,
+            "file": filename,
+            "predictions": predictions,
+            "image_with_boxes": image_with_boxes,
+            "image_url": f"http://{request.host}/uploads/{filename}"
+        }), 200
+        
+    except Exception as e:
+        print(f"[ERROR] Trigger camera failed: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "status": "error",
+            "message": f"Server error: {str(e)}"
+        }), 500
 
 
 @app.route("/latest", methods=["GET"])
@@ -443,6 +568,7 @@ def health_check():
     return jsonify({
         "status": "ok",
         "model": MODEL_PATH,
+        "esp32_cam_ip": ESP32_CAM_IP,
         "timestamp": int(time.time())
     })
 
@@ -453,11 +579,42 @@ def serve_uploads(filename):
     return send_from_directory(UPLOAD_FOLDER, filename)
 
 
+# 🆕 ==================== TEST ENDPOINT ====================
+@app.route("/test-esp32", methods=["GET"])
+def test_esp32_connection():
+    """🆕 Test endpoint untuk cek koneksi ke ESP32-CAM."""
+    success, image_data, error_msg = request_esp32_capture()
+    
+    if success:
+        return jsonify({
+            "status": "success",
+            "message": "ESP32-CAM connected successfully!",
+            "image_size_bytes": len(image_data),
+            "esp32_ip": ESP32_CAM_IP
+        }), 200
+    else:
+        return jsonify({
+            "status": "error",
+            "message": error_msg,
+            "esp32_ip": ESP32_CAM_IP,
+            "esp32_endpoint": ESP32_CAPTURE_ENDPOINT
+        }), 500
+
+
 # ==================== MAIN ====================
 if __name__ == "__main__":
-    print("🚀 Starting Flask YOLO Detection Server...")
+    print("\n" + "="*60)
+    print("🚀 Starting Flask YOLO Detection Server with ESP32-CAM Support")
+    print("="*60)
     print(f"📁 Upload folder: {UPLOAD_FOLDER}")
     print(f"🗃️ Database: {DB_NAME}")
+    print(f"📷 ESP32-CAM IP: {ESP32_CAM_IP}")
+    print(f"🔗 ESP32-CAM Endpoint: {ESP32_CAPTURE_ENDPOINT}")
     print(f"🌐 Server will be accessible on: http://0.0.0.0:9090")
+    print("="*60)
+    print("\n💡 IMPORTANT:")
+    print("   1. Update ESP32_CAM_IP variable with your ESP32-CAM IP address!")
+    print("   2. Make sure 'requests' library is installed: pip install requests")
+    print("   3. Test ESP32 connection: http://localhost:9090/test-esp32\n")
     
     app.run(host="0.0.0.0", port=9090, debug=False)
