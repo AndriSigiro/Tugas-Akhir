@@ -5,42 +5,32 @@ import sqlite3
 import uuid
 import json
 import io
-import requests
 from flask import Flask, request, jsonify, send_file, send_from_directory
 from ultralytics import YOLO
 import cv2
 import numpy as np
-from collections import defaultdict
 
 # ==================== CONFIGURATION ====================
 app = Flask(__name__)
 
 # Folders & Paths
-UPLOAD_FOLDER = "uploads"
-MODEL_PATH = os.path.join("Model", "best (12).pt")
-DB_NAME = "results.db"
-
-# 🆕 ESP32-CAM Configuration
-ESP32_CAM_IP = "10.65.135.92"  # 🔧 GANTI dengan IP ESP32-CAM Anda!
-ESP32_CAM_PORT = 80
-ESP32_CAPTURE_ENDPOINT = f"http://{ESP32_CAM_IP}:{ESP32_CAM_PORT}/capture"
+UPLOAD_FOLDER = "/root/yolo-server/uploads"
+MODEL_PATH = "/root/yolo-server/Model/best (12).pt"
+DB_NAME = "/root/yolo-server/results.db"
 
 # Create upload folder
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 # ==================== MODEL LOADING ====================
-print("🔄 Loading YOLO model...")
+print("?? Loading YOLO model...")
 yolo_model = YOLO(MODEL_PATH)
-print(f"✅ Model loaded: {MODEL_PATH}")
-
+print(f"? Model loaded: {MODEL_PATH}")
 
 # ==================== DATABASE ====================
 def get_db_connection():
-    """Create and return database connection."""
     conn = sqlite3.connect(DB_NAME)
     conn.row_factory = sqlite3.Row
     
-    # Create table with FLAT structure (satu baris = satu deteksi)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS results(
             id TEXT NOT NULL,
@@ -56,54 +46,32 @@ def get_db_connection():
         );
     """)
     
-    # Create index untuk query cepat
-    conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_results_id_ts 
-        ON results(id, ts DESC);
-    """)
-    
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_results_id_ts ON results(id, ts DESC);")
     conn.commit()
     return conn
 
-
 def save_detection_to_db(record_id, device_id, timestamp, filename, predictions):
-    """Save detection result to database - FLAT structure."""
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Hapus data lama dengan record_id yang sama (jika re-upload)
     cursor.execute("DELETE FROM results WHERE id = ?", (record_id,))
     
-    # Insert setiap deteksi sebagai baris terpisah
     for pred in predictions:
         label = pred.get("label", "unknown")
         score = pred.get("score", 0.0)
         box = pred.get("box", [])
         
-        # Skip unknown detections
         if label == "unknown":
             continue
         
-        # Extract box coordinates
         x1, y1, x2, y2 = (box[0], box[1], box[2], box[3]) if len(box) == 4 else (0, 0, 0, 0)
         
         cursor.execute("""
             INSERT INTO results (id, device_id, ts, file, label, score, box_x1, box_y1, box_x2, box_y2)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            record_id,
-            device_id,
-            timestamp,
-            filename,
-            label,
-            round(score, 4),
-            round(x1, 2),
-            round(y1, 2),
-            round(x2, 2),
-            round(y2, 2)
-        ))
+        """, (record_id, device_id, timestamp, filename, label, round(score, 4),
+              round(x1, 2), round(y1, 2), round(x2, 2), round(y2, 2)))
     
-    # Jika tidak ada deteksi valid, simpan satu baris "no_detection"
     if not predictions or all(p.get("label") == "unknown" for p in predictions):
         cursor.execute("""
             INSERT INTO results (id, device_id, ts, file, label, score, box_x1, box_y1, box_x2, box_y2)
@@ -113,12 +81,8 @@ def save_detection_to_db(record_id, device_id, timestamp, filename, predictions)
     conn.commit()
     conn.close()
 
-
 def get_latest_result():
-    """Get latest detection result from database."""
     conn = get_db_connection()
-    
-    # Get latest timestamp
     cur = conn.execute("SELECT MAX(ts) as max_ts FROM results")
     row = cur.fetchone()
     
@@ -127,22 +91,16 @@ def get_latest_result():
         return None
     
     latest_ts = row["max_ts"]
-    
-    # Get all detections for that timestamp
     cur = conn.execute("""
         SELECT id, device_id, ts, file, label, score, box_x1, box_y1, box_x2, box_y2
-        FROM results 
-        WHERE ts = ?
-        ORDER BY score DESC
+        FROM results WHERE ts = ? ORDER BY score DESC
     """, (latest_ts,))
-    
     rows = cur.fetchall()
     conn.close()
     
     if not rows:
         return None
     
-    # Group into single record with predictions array
     first = rows[0]
     predictions = []
     for r in rows:
@@ -160,38 +118,22 @@ def get_latest_result():
         "pred": predictions
     }
 
-
 def get_results_list(limit=20, offset=0):
-    """Get list of detection results with pagination - GROUPED by record."""
     conn = get_db_connection()
-    
-    # Get unique records ordered by timestamp
     cur = conn.execute("""
         SELECT DISTINCT id, device_id, ts, file
-        FROM results 
-        GROUP BY id
-        ORDER BY ts DESC
-        LIMIT ? OFFSET ?
+        FROM results GROUP BY id ORDER BY ts DESC LIMIT ? OFFSET ?
     """, (limit, offset))
-    
     records = cur.fetchall()
     
-    # For each record, get all its detections
     result_list = []
     for record in records:
-        record_id = record["id"]
-        
-        # Get all detections for this record
         det_cur = conn.execute("""
             SELECT label, score, box_x1, box_y1, box_x2, box_y2
-            FROM results
-            WHERE id = ?
-            ORDER BY score DESC
-        """, (record_id,))
-        
+            FROM results WHERE id = ? ORDER BY score DESC
+        """, (record["id"],))
         detections = det_cur.fetchall()
         
-        # Build predictions array
         predictions = []
         for det in detections:
             predictions.append({
@@ -211,45 +153,49 @@ def get_results_list(limit=20, offset=0):
     conn.close()
     return result_list
 
-
 # ==================== YOLO INFERENCE ====================
 def run_yolo_detection(image_path):
-    """Run YOLO inference and draw bounding boxes on image."""
-    results = yolo_model.predict(source=image_path, save=False, verbose=True, conf=0.5)
-    print(f"[YOLO] Running inference on: {image_path}")
+    img = cv2.imread(image_path)
+    orig_h, orig_w = img.shape[:2]  # Simpan resolusi asli
+    
+    # Resize ke 640x640 untuk inference (standar YOLO)
+    input_size = 640
+    img_resized = cv2.resize(img, (input_size, input_size))
+    
+    results = yolo_model.predict(source=img_resized, save=False, verbose=False, conf=0.5)
     
     predictions = []
     if results and results[0].boxes and len(results[0].boxes) > 0:
         for box in results[0].boxes:
             label = results[0].names[int(box.cls)]
             score = float(box.conf)
-            xyxy = box.xyxy.cpu().numpy()[0].tolist()
+            xyxy = box.xyxy.cpu().numpy()[0].tolist()  # Box di resized image
             
             if score >= 0.6:
+                # Scale kembali ke resolusi asli
+                x1 = int(xyxy[0] * orig_w / input_size)
+                y1 = int(xyxy[1] * orig_h / input_size)
+                x2 = int(xyxy[2] * orig_w / input_size)
+                y2 = int(xyxy[3] * orig_h / input_size)
+                
                 predictions.append({
                     "label": label,
                     "score": score,
-                    "box": xyxy
+                    "box": [x1, y1, x2, y2]
                 })
-                print(f"[YOLO] Detected: {label} (confidence: {score:.2f})")
     
     if not predictions:
-        print("[YOLO] No objects detected")
         predictions = [{"label": "unknown", "score": 0.0, "box": []}]
     
+    # Gambar box di gambar asli (bukan resized)
     image_with_boxes = draw_boxes_on_image(image_path, predictions)
-    
     return predictions, image_with_boxes
-
-
 def draw_boxes_on_image(image_path, predictions):
-    """Draw bounding boxes on image."""
     img = cv2.imread(image_path)
     if img is None:
         raise ValueError(f"Failed to load image: {image_path}")
     
     THICKNESS = 8
-
     for pred in predictions:
         if pred["box"] and len(pred["box"]) == 4:
             x1, y1, x2, y2 = map(int, pred["box"])
@@ -261,91 +207,28 @@ def draw_boxes_on_image(image_path, predictions):
                 box_color = (0, 255, 0)    # Green
             else:
                 box_color = (128, 128, 128)  # Gray
-
             cv2.rectangle(img, (x1, y1), (x2, y2), box_color, THICKNESS)
     
     _, buffer = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
     img_base64 = base64.b64encode(buffer).decode('utf-8')
-    
     return f"data:image/jpeg;base64,{img_base64}"
-
 
 # ==================== HELPER FUNCTIONS ====================
 def generate_record_id():
-    """Generate unique record ID."""
     return f"rec_{uuid.uuid4().hex[:12]}"
 
-
 def save_base64_image(image_b64, device_id, timestamp):
-    """Save base64 encoded image to file."""
     raw = base64.b64decode(image_b64)
     filename = f"{device_id}_{timestamp}.jpg"
     filepath = os.path.join(UPLOAD_FOLDER, filename)
-    
     with open(filepath, "wb") as f:
         f.write(raw)
-    
     return filename, filepath
-
-
-# 🆕 ==================== ESP32-CAM FUNCTIONS ====================
-def request_esp32_capture():
-    """
-    Send request to ESP32-CAM to capture image.
-    Returns: (success: bool, image_data: bytes or None, error_message: str or None)
-    """
-    try:
-        print(f"[ESP32] Requesting capture from {ESP32_CAPTURE_ENDPOINT}...")
-        
-        # Request ke ESP32-CAM dengan timeout 15 detik
-        response = requests.get(
-            ESP32_CAPTURE_ENDPOINT,
-            timeout=15
-        )
-        
-        if response.status_code == 200:
-            # Cek apakah response adalah image
-            content_type = response.headers.get('Content-Type', '')
-            
-            if 'image' in content_type:
-                print(f"[ESP32] ✅ Image received ({len(response.content)} bytes)")
-                return True, response.content, None
-            else:
-                # Mungkin ESP32 kirim JSON atau text
-                try:
-                    data = response.json()
-                    if 'image' in data:
-                        # Base64 encoded image
-                        image_data = base64.b64decode(data['image'])
-                        print(f"[ESP32] ✅ Base64 image received ({len(image_data)} bytes)")
-                        return True, image_data, None
-                except:
-                    pass
-                
-                print(f"[ESP32] ❌ Invalid response format: {content_type}")
-                return False, None, "ESP32 response bukan format image"
-        
-        else:
-            print(f"[ESP32] ❌ HTTP Error: {response.status_code}")
-            return False, None, f"ESP32 error: {response.status_code}"
-    
-    except requests.exceptions.Timeout:
-        print("[ESP32] ❌ Timeout waiting for ESP32-CAM")
-        return False, None, "ESP32-CAM timeout (tidak merespon dalam 15 detik)"
-    
-    except requests.exceptions.ConnectionError:
-        print(f"[ESP32] ❌ Cannot connect to {ESP32_CAPTURE_ENDPOINT}")
-        return False, None, f"Tidak dapat terhubung ke ESP32-CAM di {ESP32_CAM_IP}"
-    
-    except Exception as e:
-        print(f"[ESP32] ❌ Error: {str(e)}")
-        return False, None, f"Error: {str(e)}"
-
 
 # ==================== API ROUTES ====================
 @app.route("/upload", methods=["POST"])
 def upload_base64():
-    """Upload image via JSON (ESP32-CAM base64)."""
+    """Terima upload dari Raspberry (webcam) atau ESP32"""
     try:
         data = request.get_json(force=True)
         device_id = data.get("device_id", "unknown")
@@ -370,13 +253,12 @@ def upload_base64():
         }), 200
         
     except Exception as e:
-        print(f"[ERROR] Upload base64 failed: {str(e)}")
+        print(f"[ERROR] Upload failed: {str(e)}")
         return jsonify({"error": str(e)}), 500
-
 
 @app.route("/upload-file", methods=["POST"])
 def upload_file():
-    """Upload image via multipart file (Flutter/Web)."""
+    """Upload manual dari Flutter"""
     try:
         if "file" not in request.files:
             return jsonify({"error": "No file uploaded"}), 400
@@ -407,75 +289,23 @@ def upload_file():
         print(f"[ERROR] Upload file failed: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-
-# 🆕 ==================== ESP32-CAM TRIGGER ENDPOINT ====================
+# /trigger-camera DIBIARKAN UNTUK KOMPATIBILITAS, TAPI TIDAK PULL GAMBAR
 @app.route("/trigger-camera", methods=["POST"])
 def trigger_camera():
-    """
-    🆕 Endpoint untuk memicu ESP32-CAM mengambil foto.
-    Flutter -> Flask -> ESP32-CAM -> Flask (process) -> Flutter
-    """
-    try:
-        print("\n" + "="*50)
-        print("🎬 TRIGGER CAMERA REQUEST RECEIVED")
-        print("="*50)
-        
-        # 1. Request foto ke ESP32-CAM
-        success, image_data, error_msg = request_esp32_capture()
-        
-        if not success:
-            return jsonify({
-                "status": "error",
-                "message": error_msg or "Failed to capture from ESP32-CAM"
-            }), 500
-        
-        # 2. Simpan gambar dari ESP32-CAM
-        timestamp = int(time.time())
-        device_id = "esp32_cam"
-        filename = f"esp32_{timestamp}.jpg"
-        filepath = os.path.join(UPLOAD_FOLDER, filename)
-        
-        with open(filepath, "wb") as f:
-            f.write(image_data)
-        
-        print(f"[SAVE] Image saved to: {filepath}")
-        
-        # 3. Jalankan deteksi YOLO
-        predictions, image_with_boxes = run_yolo_detection(filepath)
-        
-        # 4. Simpan ke database
-        record_id = generate_record_id()
-        save_detection_to_db(record_id, device_id, timestamp, filename, predictions)
-        
-        print(f"[DB] Saved to database with ID: {record_id}")
-        print("="*50 + "\n")
-        
-        # 5. Return hasil ke Flutter
-        return jsonify({
-            "status": "success",
-            "message": "Photo captured and processed successfully",
-            "id": record_id,
-            "device_id": device_id,
-            "timestamp": timestamp,
-            "file": filename,
-            "predictions": predictions,
-            "image_with_boxes": image_with_boxes,
-            "image_url": f"http://{request.host}/uploads/{filename}"
-        }), 200
-        
-    except Exception as e:
-        print(f"[ERROR] Trigger camera failed: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({
-            "status": "error",
-            "message": f"Server error: {str(e)}"
-        }), 500
+    """Hanya informasi bahwa trigger diterima (trigger sebenarnya dari HP langsung ke Raspberry)"""
+    print("\n" + "="*50)
+    print("?? TRIGGER CAMERA REQUEST FROM HP (Info Only)")
+    print("   Catatan: Capture & upload dilakukan langsung dari Raspberry ke VPS")
+    print("="*50 + "\n")
+    
+    return jsonify({
+        "status": "success",
+        "message": "Trigger diterima. Raspberry akan capture & upload otomatis."
+    }), 200
 
-
+# Route lain tetap sama
 @app.route("/latest", methods=["GET"])
 def get_latest_image():
-    """Get latest detected image with bounding boxes."""
     result = get_latest_result()
     if not result:
         return jsonify({"error": "No images found"}), 404
@@ -486,39 +316,30 @@ def get_latest_image():
     image_data = base64.b64decode(image_with_boxes.split(',')[1])
     return send_file(io.BytesIO(image_data), mimetype="image/jpeg")
 
-
 @app.route("/result", methods=["GET"])
 def get_latest_result_json():
-    """Get latest detection result as JSON."""
     result = get_latest_result()
     if not result:
         return jsonify({"error": "No results found"}), 404
     
     base_url = f"http://{request.host}"
-    
-    response = {
+    return jsonify({
         "id": result["id"],
         "device_id": result["device_id"],
         "timestamp": result["timestamp"],
         "file": result["file"],
         "pred": result["pred"],
         "image_url": f"{base_url}/uploads/{result['file']}"
-    }
-    
-    return jsonify(response)
-
+    })
 
 @app.route("/results", methods=["GET"])
 def list_detection_results():
-    """Get list of detection results with pagination."""
     limit = int(request.args.get("limit", 20))
     offset = int(request.args.get("offset", 0))
-    
     results = get_results_list(limit, offset)
     
     base_url = f"http://{request.host}"
     items = []
-    
     for result in results:
         items.append({
             "id": result["id"],
@@ -529,15 +350,10 @@ def list_detection_results():
             "image_url": f"{base_url}/uploads/{result['file']}"
         })
     
-    return jsonify({
-        "items": items,
-        "count": len(items)
-    })
-
+    return jsonify({"items": items, "count": len(items)})
 
 @app.route("/latest-detection", methods=["GET"])
 def get_latest_detection():
-    """Get latest detection with complete info."""
     result = get_latest_result()
     if not result:
         return jsonify({"error": "No detection found"}), 404
@@ -546,7 +362,7 @@ def get_latest_detection():
     _, image_with_boxes = run_yolo_detection(filepath)
     
     base_url = f"http://{request.host}"
-    source = "camera" if result["device_id"].startswith("esp32") else "mobile"
+    source = "camera" if result["device_id"].startswith("web") or "raspberry" in result["device_id"] else "mobile"
     
     return jsonify({
         "status": "success",
@@ -558,63 +374,33 @@ def get_latest_detection():
         "predictions": result["pred"],
         "image_url": f"{base_url}/uploads/{result['file']}",
         "image_with_boxes": image_with_boxes,
-        "total_detections": len([p for p in result["pred"] if p["label"] != "unknown" and p["label"] != "no_detection"])
+        "total_detections": len([p for p in result["pred"] if p["label"] not in ["unknown", "no_detection"]])
     }), 200
-
 
 @app.route("/health", methods=["GET"])
 def health_check():
-    """Health check endpoint."""
     return jsonify({
         "status": "ok",
         "model": MODEL_PATH,
-        "esp32_cam_ip": ESP32_CAM_IP,
+        "server": "VPS Cloud Server",
         "timestamp": int(time.time())
     })
 
-
 @app.route('/uploads/<path:filename>')
 def serve_uploads(filename):
-    """Serve uploaded images."""
     return send_from_directory(UPLOAD_FOLDER, filename)
-
-
-# 🆕 ==================== TEST ENDPOINT ====================
-@app.route("/test-esp32", methods=["GET"])
-def test_esp32_connection():
-    """🆕 Test endpoint untuk cek koneksi ke ESP32-CAM."""
-    success, image_data, error_msg = request_esp32_capture()
-    
-    if success:
-        return jsonify({
-            "status": "success",
-            "message": "ESP32-CAM connected successfully!",
-            "image_size_bytes": len(image_data),
-            "esp32_ip": ESP32_CAM_IP
-        }), 200
-    else:
-        return jsonify({
-            "status": "error",
-            "message": error_msg,
-            "esp32_ip": ESP32_CAM_IP,
-            "esp32_endpoint": ESP32_CAPTURE_ENDPOINT
-        }), 500
-
 
 # ==================== MAIN ====================
 if __name__ == "__main__":
     print("\n" + "="*60)
-    print("🚀 Starting Flask YOLO Detection Server with ESP32-CAM Support")
+    print("?? Flask YOLO Detection Server (VPS Publik) - Mode Push from Device")
     print("="*60)
-    print(f"📁 Upload folder: {UPLOAD_FOLDER}")
-    print(f"🗃️ Database: {DB_NAME}")
-    print(f"📷 ESP32-CAM IP: {ESP32_CAM_IP}")
-    print(f"🔗 ESP32-CAM Endpoint: {ESP32_CAPTURE_ENDPOINT}")
-    print(f"🌐 Server will be accessible on: http://0.0.0.0:9090")
+    print(f"?? Upload folder: {UPLOAD_FOLDER}")
+    print(f"??? Database: {DB_NAME}")
+    print(f"?? Server accessible at: http://202.10.36.223:9090")
     print("="*60)
-    print("\n💡 IMPORTANT:")
-    print("   1. Update ESP32_CAM_IP variable with your ESP32-CAM IP address!")
-    print("   2. Make sure 'requests' library is installed: pip install requests")
-    print("   3. Test ESP32 connection: http://localhost:9090/test-esp32\n")
+    print("?? Info: Trigger capture dilakukan dari HP langsung ke Raspberry (lokal)")
+    print("   Raspberry akan upload otomatis ke /upload setelah capture")
+    print("="*60 + "\n")
     
     app.run(host="0.0.0.0", port=9090, debug=False)
