@@ -6,7 +6,7 @@ services:
     container_name: yolo-detection-api
     restart: unless-stopped
     ports:
-      - "9090:9090"
+      - "33333:9090"
     volumes:
       # Persist uploads and database
       - ./uploads:/app/uploads
