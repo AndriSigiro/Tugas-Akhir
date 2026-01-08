@@ -13,10 +13,11 @@ import numpy as np
 # ==================== CONFIGURATION ====================
 app = Flask(__name__)
 
-# Folders & Paths
-UPLOAD_FOLDER = "/root/yolo-server/uploads"
-MODEL_PATH = "/root/yolo-server/Model/best (12).pt"
-DB_NAME = "/root/yolo-server/results.db"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+UPLOAD_FOLDER = os.environ.get("UPLOAD_FOLDER", os.path.join(BASE_DIR, "uploads"))
+MODEL_PATH = os.environ.get("MODEL_PATH", os.path.join(BASE_DIR, "Model", "best (12).pt"))
+DB_NAME = os.environ.get("DB_NAME", os.path.join(BASE_DIR, "results.db"))
 
 # Create upload folder
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -392,15 +393,26 @@ def serve_uploads(filename):
 
 # ==================== MAIN ====================
 if __name__ == "__main__":
+    import socket
+    
+    # Get local IP for display
+    hostname = socket.gethostname()
+    
     print("\n" + "="*60)
-    print("?? Flask YOLO Detection Server (VPS Publik) - Mode Push from Device")
+    print("🚀 Flask YOLO Detection Server - Egg Fertility Detection")
     print("="*60)
-    print(f"?? Upload folder: {UPLOAD_FOLDER}")
-    print(f"??? Database: {DB_NAME}")
-    print(f"?? Server accessible at: http://202.10.36.223:9090")
+    print(f"📁 Upload folder: {UPLOAD_FOLDER}")
+    print(f"🗃️ Database: {DB_NAME}")
+    print(f"🤖 Model: {MODEL_PATH}")
+    print(f"🌐 Server running on: http://0.0.0.0:9090")
     print("="*60)
-    print("?? Info: Trigger capture dilakukan dari HP langsung ke Raspberry (lokal)")
-    print("   Raspberry akan upload otomatis ke /upload setelah capture")
+    print("📡 API Endpoints:")
+    print("   POST /upload        - Upload base64 image")
+    print("   POST /upload-file   - Upload image file")
+    print("   GET  /latest        - Get latest detection image")
+    print("   GET  /result        - Get latest result JSON")
+    print("   GET  /results       - List all results")
+    print("   GET  /health        - Health check")
     print("="*60 + "\n")
     
     app.run(host="0.0.0.0", port=9090, debug=False)
