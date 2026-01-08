@@ -34,3 +34,22 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  # ==================== NGROK TUNNEL ====================
+  ngrok:
+    image: ngrok/ngrok:latest
+    container_name: ngrok-tunnel
+    restart: unless-stopped
+    depends_on:
+      yolo-api:
+        condition: service_healthy
+    environment:
+      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
+    command: http yolo-api:9090 --log stdout
+    ports:
+      - "4040:4040"  # ngrok web interface (optional)
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"

@@ -21,19 +21,31 @@ A Flask-based API server for detecting egg fertility using YOLOv8 object detecti
    cd /path/to/deployment/ta
    ```
 
-3. **Build and run with Docker Compose:**
+3. **Set up ngrok (for public URL):**
    ```bash
-   docker-compose up -d --build
+   # Copy and edit environment file
+   cp .env.example .env
+   nano .env  # Add your NGROK_AUTHTOKEN
+   ```
+   
+   Get your free token at: https://dashboard.ngrok.com/get-started/your-authtoken
+
+4. **Build and run with Docker Compose:**
+   ```bash
+   docker compose up -d --build
    ```
 
-4. **Check if it's running:**
+5. **Get your public ngrok URL:**
    ```bash
-   docker-compose logs -f
+   docker compose logs ngrok
    ```
+   Look for the line: `url=https://xxxx-xx-xx-xx-xx.ngrok-free.app`
 
-5. **Verify the API:**
+6. **Verify the API:**
    ```bash
    curl http://localhost:9090/health
+   # Or use ngrok URL:
+   curl https://your-ngrok-url.ngrok-free.app/health
    ```
 
 ### Docker Commands
